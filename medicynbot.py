@@ -16,7 +16,7 @@ from telegram.ext import (
 # ----------------------------
 # CONFIG
 # ----------------------------
-TZ = ZoneInfo("Asia/Jakarta")
+TZ = ZoneInfo("Asia/Singapore")
 
 FOOD_TIME = time(hour=10, minute=0, tzinfo=TZ)
 MED_MORNING_TIME = time(hour=11, minute=0, tzinfo=TZ)
