@@ -1,89 +1,92 @@
 import os
-import json
 import logging
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 from typing import Optional
 
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
     ContextTypes,
+    Defaults,
 )
-from telegram.ext import Defaults
 
 # ----------------------------
 # CONFIG
 # ----------------------------
 TZ = ZoneInfo("Asia/Jakarta")
-DATA_FILE = "bot_data.json"
 
-# Times (Asia/Jakarta)
 FOOD_TIME = time(hour=10, minute=0, tzinfo=TZ)
 MED_MORNING_TIME = time(hour=11, minute=0, tzinfo=TZ)
 MED_EVENING_TIME = time(hour=18, minute=0, tzinfo=TZ)
 
-NAG_EVERY = timedelta(minutes=30)  # keep bugging interval
+NAG_EVERY = timedelta(minutes=30)
+
+# Optional: set this to YOUR chat id to get alerts / debug
+# (Leave empty if you don't want it)
+ADMIN_CHAT_ID_ENV = "ADMIN_CHAT_ID"
+
+# Cynthia persistence method (recommended on Railway):
+# Set CYNTHIA_CHAT_ID as an environment variable.
+CYNTHIA_CHAT_ID_ENV = "CYNTHIA_CHAT_ID"
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     level=logging.INFO,
 )
-logger = logging.getLogger("med_reminder_bot")
+logger = logging.getLogger("medicynbot")
 
 
 # ----------------------------
-# SIMPLE JSON STORAGE
+# ENV + RUNTIME STORAGE
 # ----------------------------
-def load_data() -> dict:
-    if not os.path.exists(DATA_FILE):
-        return {}
-    try:
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
+def get_admin_chat_id() -> Optional[int]:
+    v = os.getenv(ADMIN_CHAT_ID_ENV)
+    return int(v) if v and v.isdigit() else None
 
 
-def save_data(data: dict) -> None:
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+def get_cynthia_chat_id(context: ContextTypes.DEFAULT_TYPE) -> Optional[int]:
+    """
+    Priority:
+    1) Environment variable CYNTHIA_CHAT_ID (persists on Railway)
+    2) In-memory app.bot_data (works until the process restarts)
+    """
+    env = os.getenv(CYNTHIA_CHAT_ID_ENV)
+    if env and env.isdigit():
+        return int(env)
+
+    mem = context.application.bot_data.get("cynthia_chat_id")
+    return int(mem) if mem is not None else None
 
 
-def get_cynthia_chat_id() -> Optional[int]:
-    data = load_data()
-    cid = data.get("cynthia_chat_id")
-    return int(cid) if cid is not None else None
-
-
-def set_cynthia_chat_id(chat_id: int) -> None:
-    data = load_data()
-    data["cynthia_chat_id"] = chat_id
-    save_data(data)
-
-
-# ----------------------------
-# HELPERS (JOBS)
-# ----------------------------
-def nag_job_name(chat_id: int, slot: str, date_key: str) -> str:
-    # date_key prevents “yesterday’s nag job” interfering with today
-    return f"nag:{chat_id}:{slot}:{date_key}"
+def set_cynthia_chat_id_runtime(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    context.application.bot_data["cynthia_chat_id"] = chat_id
 
 
 def today_key(now: datetime) -> str:
-    # YYYY-MM-DD in Jakarta
     return now.astimezone(TZ).strftime("%Y-%m-%d")
 
 
+def nag_job_name(chat_id: int, slot: str, date_key: str) -> str:
+    return f"nag:{chat_id}:{slot}:{date_key}"
+
+
+def stop_nagging(job_queue, chat_id: int, slot: str, date_key: str) -> int:
+    jobs = job_queue.get_jobs_by_name(nag_job_name(chat_id, slot, date_key))
+    for j in jobs:
+        j.schedule_removal()
+    return len(jobs)
+
+
+# ----------------------------
+# JOBS
+# ----------------------------
 async def send_food_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = get_cynthia_chat_id()
+    chat_id = get_cynthia_chat_id(context)
     if not chat_id:
+        logger.info("Food reminder skipped: Cynthia not linked yet.")
         return
 
     await context.bot.send_message(
@@ -95,22 +98,22 @@ async def send_food_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def send_medicine_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Runs at 11:00 and 18:00 daily.
-    Creates a nag job every 30 minutes until Cynthia presses the button.
+    Starts nagging every 30 minutes until Cynthia taps ✅ Taken.
     """
-    chat_id = get_cynthia_chat_id()
+    chat_id = get_cynthia_chat_id(context)
     if not chat_id:
+        logger.info("Medicine reminder skipped: Cynthia not linked yet.")
         return
 
     slot = context.job.data["slot"]  # "morning" or "evening"
     now = datetime.now(TZ)
     date_key = today_key(now)
 
-    # Cancel any leftover nag jobs for this same slot + today (just in case)
+    # Clear any existing nag for same slot & today (safety)
     existing = context.job_queue.get_jobs_by_name(nag_job_name(chat_id, slot, date_key))
     for j in existing:
         j.schedule_removal()
 
-    # Send initial reminder with button
     label = "🌞 Morning" if slot == "morning" else "🌙 Evening"
     keyboard = InlineKeyboardMarkup(
         [[InlineKeyboardButton("✅ Taken", callback_data=f"taken:{slot}:{date_key}")]]
@@ -125,7 +128,7 @@ async def send_medicine_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
         reply_markup=keyboard,
     )
 
-    # Schedule nagging every 30 minutes
+    # Start nag loop
     context.job_queue.run_repeating(
         callback=nag_medicine,
         interval=NAG_EVERY,
@@ -136,15 +139,13 @@ async def send_medicine_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def nag_medicine(context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = get_cynthia_chat_id()
+    chat_id = get_cynthia_chat_id(context)
     if not chat_id:
-        # No one linked; stop this job
         context.job.schedule_removal()
         return
 
     slot = context.job.data["slot"]
     date_key = context.job.data["date_key"]
-
     label = "🌞 Morning" if slot == "morning" else "🌙 Evening"
 
     keyboard = InlineKeyboardMarkup(
@@ -161,40 +162,55 @@ async def nag_medicine(context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-def stop_nagging(job_queue, chat_id: int, slot: str, date_key: str) -> int:
-    jobs = job_queue.get_jobs_by_name(nag_job_name(chat_id, slot, date_key))
-    for j in jobs:
-        j.schedule_removal()
-    return len(jobs)
-
-
 # ----------------------------
-# COMMANDS / HANDLERS
+# COMMANDS / BUTTONS
 # ----------------------------
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "Hi! I can remind Cynthia to eat + take medicine.\n\n"
-        "If you are Cynthia, run /iamcynthia in this chat.\n"
-        "Use /status to see if nagging is active today."
+        "Hi! I remind Cynthia to eat + take medicine.\n\n"
+        "If you are Cynthia, run /iamcynthia.\n"
+        "Use /status to see today's nag status."
     )
 
 
 async def iamcynthia_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
-    set_cynthia_chat_id(chat_id)
+    set_cynthia_chat_id_runtime(context, chat_id)
+
+    admin_id = get_admin_chat_id()
+    msg_for_admin = (
+        "✅ Cynthia linked (runtime).\n\n"
+        f"Set this in Railway Variables for persistence:\n"
+        f"{CYNTHIA_CHAT_ID_ENV}={chat_id}"
+    )
+
     await update.message.reply_text(
-        "✅ Linked! I will send the reminders to you here.\n\n"
+        "✅ Linked! I’ll send reminders to you here.\n\n"
         "Daily schedule (Asia/Jakarta):\n"
         "• 10:00 food\n"
         "• 11:00 medicine (nag until ✅ Taken)\n"
-        "• 18:00 medicine (nag until ✅ Taken)"
+        "• 18:00 medicine (nag until ✅ Taken)\n\n"
+        "If this bot is running on a server, ask Jessen to set your chat_id in env vars."
     )
+
+    # If you set ADMIN_CHAT_ID, bot will DM you the chat_id automatically.
+    if admin_id:
+        try:
+            await context.bot.send_message(chat_id=admin_id, text=msg_for_admin)
+        except Exception as e:
+            logger.warning("Could not notify admin: %s", e)
+    else:
+        logger.info(msg_for_admin)
 
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    cynthia_id = get_cynthia_chat_id()
+    cynthia_id = get_cynthia_chat_id(context)
     if not cynthia_id:
-        await update.message.reply_text("No Cynthia linked yet. Cynthia should run /iamcynthia.")
+        await update.message.reply_text(
+            "Cynthia not linked yet.\n"
+            "Cynthia should run /iamcynthia.\n"
+            f"(Recommended for server: set {CYNTHIA_CHAT_ID_ENV} in env vars.)"
+        )
         return
 
     now = datetime.now(TZ)
@@ -203,9 +219,12 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     morning_jobs = context.job_queue.get_jobs_by_name(nag_job_name(cynthia_id, "morning", dk))
     evening_jobs = context.job_queue.get_jobs_by_name(nag_job_name(cynthia_id, "evening", dk))
 
+    env_set = bool(os.getenv(CYNTHIA_CHAT_ID_ENV))
+
     await update.message.reply_text(
         "📌 Status\n"
-        f"• Cynthia linked chat_id: {cynthia_id}\n"
+        f"• Cynthia chat_id: {cynthia_id}\n"
+        f"• Env persistence set: {'YES' if env_set else 'NO'}\n"
         f"• Today (Jakarta): {dk}\n"
         f"• Morning nag active: {'YES' if morning_jobs else 'NO'}\n"
         f"• Evening nag active: {'YES' if evening_jobs else 'NO'}"
@@ -214,44 +233,41 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def taken_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    await query.answer()  # acknowledge click
+    await query.answer()
 
-    cynthia_id = get_cynthia_chat_id()
+    cynthia_id = get_cynthia_chat_id(context)
     if not cynthia_id:
-        await query.edit_message_text("No Cynthia linked yet. Run /iamcynthia.")
+        await query.edit_message_text("Cynthia not linked yet. Run /iamcynthia.")
         return
 
     # callback_data: taken:{slot}:{date_key}
     try:
         _, slot, date_key = query.data.split(":")
     except ValueError:
-        await query.edit_message_text("Something went wrong with the button data.")
+        await query.edit_message_text("Button data error.")
         return
 
-    # Only allow Cynthia to stop nagging (optional safety)
+    # Only allow Cynthia to confirm in her chat
     if query.message.chat_id != cynthia_id:
         await query.edit_message_text("Only Cynthia can confirm this.")
         return
 
     removed = stop_nagging(context.job_queue, cynthia_id, slot, date_key)
+    label = "Morning" if slot == "morning" else "Evening"
 
-    label = "morning" if slot == "morning" else "evening"
-    msg = f"✅ Noted! {label.capitalize()} medicine confirmed. I’ll stop nagging now."
+    msg = f"✅ Noted! {label} medicine confirmed. I’ll stop nagging now."
     if removed == 0:
-        msg += "\n\n(There wasn’t an active nag timer, but confirmation is recorded anyway.)"
+        msg += "\n\n(There wasn’t an active nag timer, but confirmation is recorded.)"
 
-    # Update message to remove button
     await query.edit_message_text(msg)
 
 
 # ----------------------------
-# SCHEDULER SETUP
+# SCHEDULER
 # ----------------------------
 def schedule_daily_jobs(app: Application) -> None:
-    # Runs every day at 10:00 Jakarta
     app.job_queue.run_daily(send_food_reminder, time=FOOD_TIME, name="daily_food")
 
-    # Runs every day at 11:00 Jakarta
     app.job_queue.run_daily(
         send_medicine_reminder,
         time=MED_MORNING_TIME,
@@ -259,7 +275,6 @@ def schedule_daily_jobs(app: Application) -> None:
         data={"slot": "morning"},
     )
 
-    # Runs every day at 18:00 Jakarta
     app.job_queue.run_daily(
         send_medicine_reminder,
         time=MED_EVENING_TIME,
@@ -271,24 +286,17 @@ def schedule_daily_jobs(app: Application) -> None:
 def main() -> None:
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
-        raise RuntimeError(
-            "Missing TELEGRAM_BOT_TOKEN env var. Example:\n"
-            "export TELEGRAM_BOT_TOKEN='123:ABC...'\n"
-        )
+        raise RuntimeError("Missing TELEGRAM_BOT_TOKEN env var.")
 
     defaults = Defaults(tzinfo=TZ)
 
     app = Application.builder().token(token).defaults(defaults).build()
 
-    # Commands
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("iamcynthia", iamcynthia_command))
     app.add_handler(CommandHandler("status", status_command))
-
-    # Button handler
     app.add_handler(CallbackQueryHandler(taken_button, pattern=r"^taken:"))
 
-    # Schedule jobs
     schedule_daily_jobs(app)
 
     logger.info("Bot running (polling)...")
