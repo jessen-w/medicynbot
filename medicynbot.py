@@ -167,7 +167,7 @@ async def nag_medicine(context: ContextTypes.DEFAULT_TYPE) -> None:
 # ----------------------------
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "Hi! I remind Cynthia to eat + take medicine.\n\n"
+        "Hi! I remind Cynthia to take medicine.\n\n"
         "If you are Cynthia, run /iamcynthia.\n"
         "Use /status to see today's nag status."
     )
@@ -186,11 +186,6 @@ async def iamcynthia_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     await update.message.reply_text(
         "✅ Linked! I’ll send reminders to you here.\n\n"
-        "Daily schedule (Asia/Jakarta):\n"
-        "• 10:00 food\n"
-        "• 11:00 medicine (nag until ✅ Taken)\n"
-        "• 18:00 medicine (nag until ✅ Taken)\n\n"
-        "If this bot is running on a server, ask Jessen to set your chat_id in env vars."
     )
 
     # If you set ADMIN_CHAT_ID, bot will DM you the chat_id automatically.
