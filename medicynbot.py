@@ -18,9 +18,9 @@ from telegram.ext import (
 # ----------------------------
 TZ = ZoneInfo("Asia/Singapore")
 
-FOOD_TIME = time(hour=10, minute=0, tzinfo=TZ)
-MED_MORNING_TIME = time(hour=11, minute=0, tzinfo=TZ)
-MED_EVENING_TIME = time(hour=18, minute=0, tzinfo=TZ)
+FOOD_TIME = time(hour=7, minute=0, tzinfo=TZ)
+MED_MORNING_TIME = time(hour=8, minute=0, tzinfo=TZ)
+MED_EVENING_TIME = time(hour=19, minute=0, tzinfo=TZ)
 
 NAG_EVERY = timedelta(minutes=30)
 
@@ -91,13 +91,13 @@ async def send_food_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     await context.bot.send_message(
         chat_id=chat_id,
-        text="🍽️ Cynthia, time to eat ya! (You need food before/with your medicine.)",
+        text="Good Morning Cynthia! Please bring your medicine along with you!",
     )
 
 
 async def send_medicine_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Runs at 11:00 and 18:00 daily.
+    Runs at 8:00 and 19:00 daily.
     Starts nagging every 30 minutes until Cynthia taps ✅ Taken.
     """
     chat_id = get_cynthia_chat_id(context)
